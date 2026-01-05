@@ -248,7 +248,7 @@ def test_attr_num(attr_num, n, k, q):
     print(msg_1)
 
 if __name__ == '__main__':
-    n = 50
+    n = 100
     k = 12
     q = 2**k
     m = 2*n*k
