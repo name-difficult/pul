@@ -107,28 +107,32 @@ def csprng_normal_vec(std: float, size: int) -> np.ndarray:
 # ============================================================
 
 def sample_psi_alpha(alpha: float, q: int, size: int) -> np.ndarray:
-    r"""
-    Sample noise from Psi_alpha as defined in Regev-style LWE:
+    """
+    Sample noise from Psi_alpha (Regev-style LWE):
 
-      x ~ N(0, alpha^2 / (2*pi))   over R (conceptually over T = R/Z)
-      e = round(q * x) mod q       in Z_q
+      x ~ N(0, alpha^2 / (2*pi)) over R
+      e = round(q * x) mod q in Z_q
 
-    Returns centered representatives in (-q/2, q/2].
+    Returns centered representatives in (-(q//2), q//2].
     """
     if not (0.0 < alpha < 1.0):
         raise ValueError("alpha must be in (0,1).")
-    if q <= 0 or (q & (q - 1)) != 0:
-        raise ValueError("This implementation expects q = 2^k (power of two).")
+    if q <= 1:
+        raise ValueError("q must be an integer >= 2.")
 
-    sigma_T = alpha / math.sqrt(2.0 * math.pi)          # std on T (before scaling by q)
-    # Sample x ~ N(0, sigma_T^2) using CSPRNG-based Gaussian
-    x = csprng_normal_vec(std=sigma_T, size=size)       # float64
+    # standard deviation of the Gaussian over R
+    sigma = alpha / math.sqrt(2.0 * math.pi)
 
-    # e = round(q*x) mod q
+    # sample real Gaussian noise (CSPRNG-based)
+    x = csprng_normal_vec(std=sigma, size=size)   # float64
+
+    # scale, round, and reduce mod q
     e = np.rint(q * x).astype(np.int64) % q
 
-    # Map to centered reps in (-q/2, q/2]
-    e = (e + q // 2) % q - q // 2
+    # map to centered representatives
+    half = q // 2
+    e = np.where(e > half, e - q, e)
+
     return e
 
 

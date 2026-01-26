@@ -1,47 +1,37 @@
-import secrets
 import time
+
+from LSSS import num_to_all_and_policy_str, gen_LSSS_from_policy_str, get_omega_from_attr_list_fast
+from lwe_symmetric import str_to_bits_numpy, lwe_sym_encrypt, lwe_sym_decrypt, bits_numpy_to_str
+from samplePre import get_secure_param_only_n_min, gen_trapdoor_G_trapdoor, samplePre
+import numpy as np
+import secrets
 from math import gcd
 
-import numpy as np
 
-from LSSS import gen_LSSS_from_policy_str, num_to_all_and_policy_str, get_omega_from_attr_list_fast
-from lwe_symmetric import str_to_bits_numpy, lwe_sym_encrypt, lwe_sym_decrypt, bits_numpy_to_str
-from samplePre import trapGen_fast, sampleD_34
-
-
-def setup(attr_num, n, k, q):
+def setup(attr_num, n, k, q, bar_m):
     A_list = []
-    R_list = []
-    for i in range(attr_num):
-        A, R = trapGen_fast(n, k, q)
-        A_list.append(A)
-        R_list.append(R)
-    return A_list, R_list
-
-def setup_fast(attr_num, n, k, q):
-    A_list = []
-    R_list = []
-    A, R = trapGen_fast(n, k, q)
+    T_list = []
+    G_list = []
+    SK_list = []
+    A, T, G, S_k = gen_trapdoor_G_trapdoor(n, q, k, bar_m)
     for i in range(attr_num):
         A_list.append(A)
-        R_list.append(R)
-    return A_list, R_list
+        T_list.append(T)
+        G_list.append(G)
+        SK_list.append(S_k)
+    return A_list, T_list, G_list, SK_list
 
-def random_binary_vector_secure(n: int) -> np.ndarray:
-    # generate first n-1 bits
-    z = np.fromiter((secrets.randbits(1) for _ in range(n - 1)),
-                    dtype=np.int8, count=n - 1)
-
-    # set last bit to enforce odd Hamming weight
-    parity = int(z.sum() & 1)          # 0 if even, 1 if odd
-    last_bit = 1 - parity             # make total sum odd
-    z = np.append(z, np.int8(last_bit))
-    return z
+def random_binary_vector(n: int) -> np.ndarray:
+    return np.fromiter(
+        (secrets.randbits(1) for _ in range(n)),
+        dtype=np.int8,
+        count=n
+    )
 
 def keyGenDo(attr_num, n):
     z_list = []
     for i in range(attr_num):
-        z_i = random_binary_vector_secure(n)
+        z_i = random_binary_vector(n)
         z_list.append(z_i)
     return z_list
 
@@ -53,15 +43,14 @@ def random_vector_mod_q_secure(length: int, q: int) -> np.ndarray:
 def random_nonzero_mod_q(q: int) -> int:
     if q <= 1:
         raise ValueError("q must be >= 2")
-    # sample from {1,3,5,...}
-    return secrets.randbelow(q // 2) * 2 + 1
+    # uniformly sample from {1, 2, ..., q-1}
+    return secrets.randbelow(q - 1) + 1
+
 
 def modinv(a: int, q: int) -> int:
-    """Return a^{-1} mod q if it exists; raise ValueError otherwise."""
     a %= q
-    if a == 0 or gcd(a, q) != 1:
-        raise ValueError(f"no modular inverse for a={a} mod q={q} (gcd={gcd(a,q)})")
-    # Python 3.8+ supports modular inverse via pow
+    if gcd(a, q) != 1:
+        raise ValueError("inverse does not exist")
     return pow(a, -1, q)
 
 
@@ -71,7 +60,7 @@ def encrypt(msg, s, s_index, q, leaf_node_v_list, z_list, A_list):
 
     # 2、获取主密文 c = s*gamma+M[q/2]+noise
     gamma, c = lwe_sym_encrypt(msg_bits, s, q, 0.01)
-    
+
     # 3、根据秘密s与s_index，生成向量v，其中v[s_index]=s，并计算lambda_vector = LSSS_matrix*v
     v_length = len(leaf_node_v_list[0])
     v = random_vector_mod_q_secure(v_length, q)
@@ -104,34 +93,7 @@ def encrypt(msg, s, s_index, q, leaf_node_v_list, z_list, A_list):
         c_2.append(c_2_i.astype(np.int64))
     return gamma, c, c_1, c_2, beta
 
-def random_binary_vector_secure_even_weight(n: int) -> np.ndarray:
-    z = np.fromiter((secrets.randbits(1) for _ in range(n - 1)),
-                    dtype=np.int8, count=n - 1)
-    last_bit = int(z.sum() & 1)   # 若前面是奇数，最后补 1；若偶数，补 0
-    return np.append(z, np.int8(last_bit))
-
-def random_binary_vector_secure_odd_weight(n: int) -> np.ndarray:
-    """
-    Generate a cryptographically secure binary vector z ∈ {0,1}^n
-    with ODD Hamming weight.
-    """
-    if n <= 0:
-        raise ValueError("n must be positive")
-
-    # 先随机生成前 n-1 位
-    z = np.fromiter(
-        (secrets.randbits(1) for _ in range(n - 1)),
-        dtype=np.int8,
-        count=n - 1
-    )
-
-    # 根据前 n-1 位的奇偶性，决定最后一位
-    # 如果前面是偶数个 1，就补 1；如果是奇数个 1，就补 0
-    last_bit = 1 - (int(z.sum()) & 1)
-
-    return np.append(z, np.int8(last_bit))
-
-def keyGenUsers(user_attr_list, A_list, T_list, q, z_list):
+def keyGenUsers(user_attr_list, A_list, T_list, q, z_list, SK_list):
     n = A_list[0].shape[0]
 
     sk_list = []
@@ -143,16 +105,11 @@ def keyGenUsers(user_attr_list, A_list, T_list, q, z_list):
         A_i = A_list[i]
         T_i = T_list[i]
         z_i = z_list[i]
-        e_i = sampleD_34(A_i, T_i, q, z_i, s_p=2.0, s_t=2.0)
-
-        # 确保后续的b_j是奇数
-        if i == num - 1:
-            # 最后一个用奇权重，保证总权重为奇数
-            h_i = random_binary_vector_secure_odd_weight(n)
-        else:
-            h_i = random_binary_vector_secure_even_weight(n)
-        h_list.append(h_i.astype(np.int64))
-        r_i = sampleD_34(A_i, T_i, q, h_i, s_p=2.0, s_t=2.0)
+        sk_i = SK_list[i]
+        e_i = samplePre(A_i, T_i, z_i, sk_i, q)
+        h_i = random_binary_vector(n)
+        h_list.append(h_i)
+        r_i = samplePre(A_i, T_i, h_i, sk_i, q)
 
         # 计算sk_i = t*(e_i)*(r_i^T)
         e = np.asarray(e_i, dtype=np.int64).reshape(-1, 1) % q   # (m, 1)
@@ -173,7 +130,7 @@ def keyGenUsers(user_attr_list, A_list, T_list, q, z_list):
 
     return sk_list, p
 
-def decrypt(gamma, c, c_1, c_2, sk_list, p, A_list , leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index):
+def decrypt(q, gamma, c, c_1, c_2, sk_list, p, A_list , leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index):
     ptc_1_list = []
 
     for i in range(len(A_list)):
@@ -206,15 +163,15 @@ def decrypt(gamma, c, c_1, c_2, sk_list, p, A_list , leaf_node_name_list,leaf_no
     m_str = bits_numpy_to_str(m_bits)
     return m_str
 
-def test_attr_num(attr_num, n, k, q):
-    m = 2*n*k
+def test_attr_num(attr_num, n):
+    n, k, q, w, bar_m, m = get_secure_param_only_n_min(n)
     policy_str = num_to_all_and_policy_str(attr_num)
     s = 50
     s_index = 1
     msg = "hello"
 
     start = time.time()
-    A_list, T_list = setup_fast(attr_num, n, k, q)
+    A_list, T_list, G_list, SK_list = setup(attr_num, n, k, q, bar_m)
     end = time.time()
     elapsed_ms = (end - start) * 1000
     print(f"setup耗时: {elapsed_ms:.3f} ms")
@@ -234,13 +191,13 @@ def test_attr_num(attr_num, n, k, q):
 
     user_attr_list = leaf_node_name_list
     start = time.time()
-    sk_list, p = keyGenUsers(user_attr_list, A_list, T_list, q, z_list)
+    sk_list, p = keyGenUsers(user_attr_list, A_list, T_list, q, z_list, SK_list)
     end = time.time()
     elapsed_ms = (end - start) * 1000
     print(f"keyGenUsers耗时: {elapsed_ms:.3f} ms")
 
     start = time.time()
-    msg_1 = decrypt(gamma, c, c_1, c_2, sk_list, p, A_list ,leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index)
+    msg_1 = decrypt(q, gamma, c, c_1, c_2, sk_list, p, A_list ,leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index)
     end = time.time()
     elapsed_ms = (end - start) * 1000
     print(f"decrypt耗时: {elapsed_ms:.3f} ms")
@@ -248,9 +205,6 @@ def test_attr_num(attr_num, n, k, q):
     print(msg_1)
 
 if __name__ == '__main__':
-    n = 100
-    k = 12
-    q = 2**k
-    m = 2*n*k
-
-    test_attr_num(100, n, k, q)
+    n = 256
+    attr_num = 4
+    test_attr_num(attr_num, n)
