@@ -38,7 +38,7 @@ def keyGenDo(attr_num, n):
 def random_vector_mod_q_secure(length: int, q: int) -> np.ndarray:
     seed = secrets.randbits(256)
     rng = np.random.default_rng(seed)
-    return rng.integers(0, q, size=length, dtype=np.int64)
+    return rng.integers(0, q, size=length, dtype=np.int32)
 
 def random_nonzero_mod_q(q: int) -> int:
     if q <= 1:
@@ -65,7 +65,7 @@ def encrypt(msg, s, s_index, q, leaf_node_v_list, z_list, A_list):
     v_length = len(leaf_node_v_list[0])
     v = random_vector_mod_q_secure(v_length, q)
     v[s_index] = s % q
-    LSSS_matrix = np.asarray(leaf_node_v_list, dtype=np.int64)
+    LSSS_matrix = np.asarray(leaf_node_v_list, dtype=np.int32)
     lambda_vector = (LSSS_matrix @ v) % q
 
     # 4、计算c_1
@@ -163,6 +163,52 @@ def decrypt(q, gamma, c, c_1, c_2, sk_list, p, A_list , leaf_node_name_list,leaf
     m_str = bits_numpy_to_str(m_bits)
     return m_str
 
+def decrypt_optimized(q, gamma, c, c_1, c_2,
+                      sk_list, p, A_list,
+                      leaf_node_name_list, leaf_node_v_list,
+                      user_attr_list, s_index):
+
+    q = int(q)
+
+    # 先拿到 n，用于分配累加器
+    A0 = np.asarray(A_list[0], dtype=np.int64)
+    n = A0.shape[0]
+
+    # ptc_1 流式累加，避免 ptc_1_list + stack 的巨大内存
+    ptc_1 = np.zeros(n, dtype=np.int64)
+
+    for c2_i, sk_i, A_i in zip(c_2, sk_list, A_list):
+        c2_i = np.asarray(c2_i, dtype=np.int64)
+        sk_i = np.asarray(sk_i, dtype=np.int64)
+        A_i  = np.asarray(A_i,  dtype=np.int64)
+
+        # 统一先 mod，尽量让数值小，减少溢出风险（尤其 q 不大时很有用）
+        np.remainder(c2_i, q, out=c2_i)
+        np.remainder(sk_i, q, out=sk_i)
+        np.remainder(A_i,  q, out=A_i)
+
+        # 分两步做：(m,) @ (m,m) -> (m,) 再 @ (m,n) -> (n,)
+        # 这样不会产生任何 (len(A_list), n) 的大中间数组
+        tmp = (c2_i @ sk_i) % q          # shape (m,)
+        ptc_1 = (ptc_1 + (tmp @ A_i.T) ) % q  # shape (n,)
+
+    # ptc = <ptc_1, p> mod q
+    p_vec = np.asarray(p, dtype=np.int64) % q
+    ptc = int(ptc_1.dot(p_vec) % q)
+
+    # omega · c1
+    omega = get_omega_from_attr_list_fast(
+        leaf_node_name_list, leaf_node_v_list, user_attr_list, s_index
+    )
+    omega_vec = np.asarray(omega, dtype=np.int64) % q
+    c1_vec    = np.asarray(c_1,  dtype=np.int64) % q
+    ptc_2 = int(omega_vec.dot(c1_vec) % q)
+
+    s = (ptc * ptc_2) % q
+
+    m_bits = lwe_sym_decrypt(gamma, c, s, q)
+    return bits_numpy_to_str(m_bits)
+
 def test_attr_num(attr_num, n):
     n, k, q, w, bar_m, m = get_secure_param_only_n_min(n)
     policy_str = num_to_all_and_policy_str(attr_num)
@@ -197,7 +243,11 @@ def test_attr_num(attr_num, n):
     print(f"keyGenUsers耗时: {elapsed_ms:.3f} ms")
 
     start = time.time()
-    msg_1 = decrypt(q, gamma, c, c_1, c_2, sk_list, p, A_list ,leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index)
+    # msg_1 = decrypt(q, gamma, c, c_1, c_2, sk_list, p, A_list ,leaf_node_name_list,leaf_node_v_list, user_attr_list, s_index)
+    msg_1 = decrypt_optimized(q, gamma, c, c_1, c_2,
+                      sk_list, p, A_list,
+                      leaf_node_name_list, leaf_node_v_list,
+                      user_attr_list, s_index)
     end = time.time()
     elapsed_ms = (end - start) * 1000
     print(f"decrypt耗时: {elapsed_ms:.3f} ms")
@@ -206,5 +256,5 @@ def test_attr_num(attr_num, n):
 
 if __name__ == '__main__':
     n = 256
-    attr_num = 4
+    attr_num = 64
     test_attr_num(attr_num, n)
